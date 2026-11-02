@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'compilation_mode.dart';
 import 'console_reporter.dart';
 import 'encode.dart';
 import 'perf_profiler.dart';
@@ -88,15 +89,18 @@ class PerfImpl<Input, Output> {
 /// 5. **Wire into PerfTester** as `implementation1` / `implementation2`
 ///    or entries in the `implementations` list.
 ///
-/// 6. **Run:**
+/// 6. **Run it AOT.** Under the JIT, identical code can differ in speed by
+///    up to 1.5x, so comparisons are reliable only from an AOT build:
 ///    ```bash
-///    # Pure Dart:
-///    dart run test/perf/some_perf_test.dart
-///
-///    # Flutter (code imports flutter packages):
-///    flutter test test/perf/some_perf_test.dart
-///
-///    # Flutter + CPU profiling:
+///    # Pure Dart or Flutter, scripts or test files (testWidgets included):
+///    dart run perf_tester:aot test/perf/some_perf_test.dart
+///    ```
+///    Flutter files are built as a desktop profile app, which also supports
+///    CPU profiling. Pure Dart files use `dart compile exe`, which has no
+///    VM service, so profile those under the JIT:
+///    ```bash
+///    # Quick runs and profiling under the JIT. Comparisons are unconfirmed.
+///    dart run --enable-vm-service test/perf/some_perf_test.dart
 ///    flutter test --enable-vmservice --no-dds test/perf/some_perf_test.dart
 ///    ```
 class PerfTester<Input, Output> {
@@ -339,6 +343,7 @@ class PerfTester<Input, Output> {
           PerfPhase.benchmark,
           if (profile) PerfPhase.profile,
         ],
+        compilationMode: currentCompilationMode,
       ),
     );
 
@@ -459,6 +464,7 @@ class PerfTester<Input, Output> {
       profileStatus: profileStatus,
       profileUnavailableReason: profileUnavailableReason,
       profiles: profiles,
+      compilationMode: currentCompilationMode,
     );
     out.runFinished(result);
     return result;

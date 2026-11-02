@@ -41,9 +41,12 @@ class PerfProfiler {
       final info = await developer.Service.getInfo();
       final uri = info.serverUri;
       if (uri == null) {
-        _unavailableReason =
-            'VM service not available. '
-            'Run with: dart run --enable-vm-service <script>';
+        _unavailableReason = const bool.fromEnvironment('dart.vm.product')
+            ? 'This build has no VM service (dart compile exe, or a Flutter '
+                  'release build). Profile under the JIT, or in a Flutter '
+                  'profile build.'
+            : 'VM service not available. '
+                  'Run with: dart run --enable-vm-service <script>';
         return false;
       }
 
@@ -53,11 +56,18 @@ class PerfProfiler {
         path: '${uri.path}ws',
       );
 
-      _service = await vmServiceConnectUri(wsUri.toString()).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () =>
-            throw TimeoutException('VM service connection timed out after 5s'),
-      );
+      // Flutter test bindings replace HttpClient with a mock that returns
+      // 400 for every request, so connect with the default HttpClient.
+      _service =
+          await HttpOverrides.runWithHttpOverrides(
+            () => vmServiceConnectUri(wsUri.toString()),
+            _DefaultHttpOverrides(),
+          ).timeout(
+            const Duration(seconds: 5),
+            onTimeout: () => throw TimeoutException(
+              'VM service connection timed out after 5s',
+            ),
+          );
 
       // Enable the profiler.
       await _service!.setFlag('profiler', 'true');
@@ -75,7 +85,12 @@ class PerfProfiler {
       // An open connection keeps the process alive; close it if setFlag or
       // a later step failed after connecting.
       await dispose();
-      _unavailableReason = 'Failed to connect: $e';
+      _unavailableReason =
+          Platform.isMacOS && e is SocketException && e.osError?.errorCode == 1
+          ? 'The macOS app sandbox blocked the connection. Add '
+                'com.apple.security.network.client to '
+                'macos/Runner/DebugProfile.entitlements. ($e)'
+          : 'Failed to connect: $e';
       return false;
     }
   }
@@ -291,3 +306,6 @@ class PerfProfiler {
     }
   }
 }
+
+/// Uses the default [HttpClient], in place of any override in the zone.
+class _DefaultHttpOverrides extends HttpOverrides {}

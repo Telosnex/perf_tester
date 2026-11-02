@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'compilation_mode.dart';
 import 'encode.dart';
 import 'reporter.dart';
 import 'results.dart';
@@ -20,6 +21,7 @@ class ConsoleReporter extends PerfReporter {
   int _step = 0;
   int _totalSteps = 0;
   List<String> _names = const [];
+  CompilationMode _mode = currentCompilationMode;
 
   static const _ruleDouble =
       '══════════════════════════════════════════════════════';
@@ -44,6 +46,7 @@ class ConsoleReporter extends PerfReporter {
     _step = 0;
     _totalSteps = plan.phases.length;
     _names = plan.implementationNames;
+    _mode = plan.compilationMode;
 
     _print('');
     _print(_ruleDouble);
@@ -60,6 +63,11 @@ class ConsoleReporter extends PerfReporter {
     ];
     _print(' Implementations: ${_names.join(', ')}');
     _print(' Steps: ${steps.join(' → ')}');
+    _print(switch (_mode) {
+      CompilationMode.aot => ' Compiled: AOT',
+      CompilationMode.jit =>
+        ' Compiled: JIT. Comparisons are not reliable; see the end.',
+    });
     _print(_ruleSingle);
   }
 
@@ -174,6 +182,13 @@ class ConsoleReporter extends PerfReporter {
           '${prefix}too few benchmark runs to compare '
               '(need at least ${minimumSamplesFor(c.significanceLevel)})',
       });
+    }
+    if (_mode == CompilationMode.jit) {
+      _sub(
+        '⚠️  JIT: identical code can differ by up to 1.5x, so these '
+        'verdicts can be wrong.',
+      );
+      _sub('   Confirm with an AOT build: dart run perf_tester:aot <file>');
     }
   }
 

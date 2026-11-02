@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'compilation_mode.dart';
+
 /// A phase of [PerfTester.run], in the order the phases run.
 enum PerfPhase { verify, warmup, benchmark, profile }
 
@@ -14,6 +16,8 @@ final class PerfRunPlan {
   /// The phases this run will execute, in order.
   final List<PerfPhase> phases;
 
+  final CompilationMode compilationMode;
+
   PerfRunPlan({
     required this.testName,
     required List<String> implementationNames,
@@ -21,6 +25,7 @@ final class PerfRunPlan {
     required this.warmupRuns,
     required this.benchmarkRuns,
     required List<PerfPhase> phases,
+    this.compilationMode = currentCompilationMode,
   }) : implementationNames = List.unmodifiable(implementationNames),
        phases = List.unmodifiable(phases);
 }
@@ -208,11 +213,11 @@ enum ComparisonVerdict {
 /// against the baseline separately, with no correction for multiple
 /// comparisons.
 ///
-/// The test treats samples from one process as independent. Under the JIT
-/// (`dart run`, `flutter test`), how the compiler lays out each function
-/// can make identical code differ by up to 1.5x for the whole process, and
-/// the test reports that difference as significant. To confirm a result,
-/// run it again in a new process, or compile with `dart compile exe`.
+/// The test treats samples as independent. Under the JIT (`dart run`,
+/// `flutter test`), identical code can run up to 1.5x faster or slower than
+/// its copy, and the difference can change during a run. The test reports
+/// that difference as significant. Use a verdict only from an AOT build:
+/// see [PerfResult.compilationMode] and `dart run perf_tester:aot`.
 final class Comparison {
   final String baselineName;
   final String implementationName;
@@ -355,6 +360,10 @@ final class PerfResult<Input, Output> {
   /// [ProfileStatus.captured]. Otherwise empty.
   final List<ProfileResult> profiles;
 
+  /// How the benchmark was compiled. Treat [comparisons] from a
+  /// [CompilationMode.jit] run as unconfirmed.
+  final CompilationMode compilationMode;
+
   PerfResult({
     required this.testName,
     required this.testCaseCount,
@@ -366,6 +375,7 @@ final class PerfResult<Input, Output> {
     required this.profileStatus,
     this.profileUnavailableReason,
     List<ProfileResult> profiles = const [],
+    this.compilationMode = currentCompilationMode,
   }) : implementations = List.unmodifiable(implementations),
        comparisons = List.unmodifiable(comparisons),
        profiles = List.unmodifiable(profiles);

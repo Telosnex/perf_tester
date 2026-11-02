@@ -10,10 +10,19 @@
 /// check [PerfResult.verification]. Supply equalityCheck for values that
 /// need custom comparison.
 ///
+/// Under the JIT (`dart run`, `flutter test`), identical code can differ in
+/// speed by up to 1.5x, so comparisons are reliable only from an AOT build.
+/// [PerfResult.compilationMode] tells which one ran. To run a file AOT:
+///
+/// ```bash
+/// dart run perf_tester:aot test/perf/foo_perf_test.dart
+/// ```
+///
 /// Progress goes to a [PerfReporter]. The default [ConsoleReporter] prints
 /// text; [SilentReporter] prints nothing.
 library;
 
+export 'src/compilation_mode.dart' show CompilationMode, currentCompilationMode;
 export 'src/console_reporter.dart' show ConsoleReporter;
 export 'src/perf_profiler.dart' show PerfProfiler;
 export 'src/perf_tester.dart' show PerfImpl, PerfTester, profileFileNames;
