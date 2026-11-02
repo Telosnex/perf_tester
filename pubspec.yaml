@@ -1,0 +1,10 @@
+name: perf_tester
+description: Compare Dart implementations, report timings, and capture CPU profiles.
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ^3.8.0
+dependencies:
+  vm_service: ^15.0.0
+dev_dependencies:
+  test: ^1.25.0
