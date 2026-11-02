@@ -6,6 +6,7 @@ import 'encode.dart';
 import 'perf_profiler.dart';
 import 'reporter.dart';
 import 'results.dart';
+import 'stats.dart';
 
 /// A named implementation entry for [PerfTester].
 class PerfImpl<Input, Output> {
@@ -111,12 +112,21 @@ class PerfTester<Input, Output> {
   /// Optional custom equality check for result comparison.
   final bool Function(Output?, Output?)? equalityCheck;
 
+  /// The most passes timed together in one sample.
+  static const _maxPassesPerSample = 1 << 20;
+
+  /// Receives every output during timing, so the compiler cannot remove
+  /// calls whose result is unused. [_runPasses] reads it after timing.
+  Object? _sink;
+  static final _neverReturned = Object();
+
   /// Seed for selecting warmup inputs. Each [run] starts a new generator
   /// with this seed, so repeated runs warm up with the same inputs.
   static const _warmupSeed = 42;
 
-  /// Measured runtime samples per implementation, in milliseconds, in the
-  /// order they were measured. Index corresponds to [implementations] index.
+  /// Measured runtime samples per implementation, in milliseconds per pass
+  /// over all test cases, in the order they were measured. Index
+  /// corresponds to [implementations] index.
   ///
   /// Each [run] clears the samples from the previous run.
   late final List<List<double>> implTimes = List.generate(
@@ -185,6 +195,24 @@ class PerfTester<Input, Output> {
   /// Mismatched outputs do not stop the run. Check
   /// [PerfResult.verification] to fail on them.
   ///
+  /// ## Timing
+  ///
+  /// Each sample times whole passes over [testCases]. If one pass of an
+  /// implementation takes less than [minSampleTime], each of its samples
+  /// times enough passes to take at least [minSampleTime], and the sample
+  /// is divided by the number of passes. This keeps timer resolution and
+  /// loop overhead from dominating fast implementations. The pass count is
+  /// in [ImplResult.passesPerSample]. Set [minSampleTime] to
+  /// [Duration.zero] to time one pass per sample.
+  ///
+  /// A synchronous result is used directly. Only a [Future] result is
+  /// awaited.
+  ///
+  /// [PerfResult.comparisons] compares each implementation to the
+  /// baseline with a two-sided Mann-Whitney U test at
+  /// [significanceLevel]. With fewer than 4 benchmark runs at the default
+  /// level, no difference can be significant.
+  ///
   /// ## CPU profiling
   ///
   /// Set [profile] to `true` to collect a CPU sample profile during the
@@ -236,11 +264,15 @@ class PerfTester<Input, Output> {
   /// analysis. See [profileFileNames].
   ///
   /// Throws an [ArgumentError] if [testCases] is empty, [warmupRuns] is
-  /// negative, or [benchmarkRuns] is less than 1. When [profile] is true,
-  /// [profileRuns] must be at least 1 and [profileTopN] must not be negative.
+  /// negative, [benchmarkRuns] is less than 1, [minSampleTime] is
+  /// negative, or [significanceLevel] is not between 0 and 1. When
+  /// [profile] is true, [profileRuns] must be at least 1 and [profileTopN]
+  /// must not be negative.
   Future<PerfResult<Input, Output>> run({
     int warmupRuns = 100,
     int benchmarkRuns = 100,
+    Duration minSampleTime = const Duration(milliseconds: 1),
+    double significanceLevel = 0.05,
     bool skipEqualityCheck = false,
     bool profile = false,
     int profileTopN = 50,
@@ -262,6 +294,20 @@ class PerfTester<Input, Output> {
     RangeError.checkNotNegative(warmupRuns, 'warmupRuns');
     if (benchmarkRuns < 1) {
       throw RangeError.value(benchmarkRuns, 'benchmarkRuns', 'Must be >= 1');
+    }
+    if (minSampleTime.isNegative) {
+      throw RangeError.value(
+        minSampleTime.inMicroseconds,
+        'minSampleTime',
+        'Must not be negative',
+      );
+    }
+    if (!(significanceLevel > 0 && significanceLevel < 1)) {
+      throw RangeError.value(
+        significanceLevel,
+        'significanceLevel',
+        'Must be between 0 and 1',
+      );
     }
     if (profile) {
       if (profileRuns < 1) {
@@ -315,16 +361,29 @@ class PerfTester<Input, Output> {
 
     // ── Benchmark ──
     out.benchmarkStarted(benchmarkRuns, testCases.length);
-    await _benchmark(benchmarkRuns, out);
+    final passes = [
+      for (var k = 0; k < implementations.length; k++)
+        await _calibrate(k, minSampleTime),
+    ];
+    await _benchmark(benchmarkRuns, passes, out);
     final implResults = [
       for (var k = 0; k < implementations.length; k++)
         ImplResult(
           name: implementations[k].name,
           samples: implTimes[k],
           casesPerSample: testCases.length,
+          passesPerSample: passes[k],
         ),
     ];
-    out.benchmarkFinished(implResults);
+    final comparisons = [
+      for (var k = 1; k < implResults.length; k++)
+        compare(
+          implResults[0],
+          implResults[k],
+          significanceLevel: significanceLevel,
+        ),
+    ];
+    out.benchmarkFinished(implResults, comparisons);
 
     // ── Profile ──
     var profileStatus = ProfileStatus.notRequested;
@@ -352,11 +411,7 @@ class PerfTester<Input, Output> {
           for (var k = 0; k < implementations.length; k++) {
             final impl = implementations[k];
             await io(profiler.clearSamples);
-            for (int r = 0; r < profileRuns; r++) {
-              for (final input in testCases) {
-                await _invoke(impl.fn, input);
-              }
-            }
+            await _runPasses(impl.fn, profileRuns);
             // One snapshot, shared by the summary and the saved JSON:
             // fetching twice makes the second fetch profile the first.
             await io(profiler.capture);
@@ -399,6 +454,7 @@ class PerfTester<Input, Output> {
       warmupRuns: warmupRuns,
       benchmarkRuns: benchmarkRuns,
       implementations: implResults,
+      comparisons: comparisons,
       verification: verification,
       profileStatus: profileStatus,
       profileUnavailableReason: profileUnavailableReason,
@@ -464,7 +520,8 @@ class PerfTester<Input, Output> {
     for (var i = 0; i < runs; i++) {
       final input = testCases[random.nextInt(testCases.length)];
       for (final impl in implementations) {
-        await _invoke(impl.fn, input);
+        final result = impl.fn(input);
+        _sink = result is Future ? await result : result;
       }
     }
     sw.stop();
@@ -473,31 +530,77 @@ class PerfTester<Input, Output> {
 
   // ── Benchmark ─────────────────────────────────────────────────────────
 
-  /// Measures all implementations across the full test suite.
+  /// Runs [passes] passes of [fn] over all test cases and returns the
+  /// elapsed time in stopwatch ticks.
+  ///
+  /// Awaits only results that are futures, so a synchronous implementation
+  /// runs without suspending.
+  Future<int> _runPasses(
+    FutureOr<Output?> Function(Input) fn,
+    int passes,
+  ) async {
+    final cases = testCases;
+    final sw = Stopwatch()..start();
+    for (var p = 0; p < passes; p++) {
+      for (var i = 0; i < cases.length; i++) {
+        final result = fn(cases[i]);
+        _sink = result is Future ? await result : result;
+      }
+    }
+    sw.stop();
+    if (identical(_sink, _neverReturned)) throw StateError('unreachable');
+    return sw.elapsedTicks;
+  }
+
+  /// Returns how many passes of implementation [k] take at least
+  /// [minSampleTime]. Returns 1 if one pass is long enough.
+  ///
+  /// The count must reach the target twice in a row. Code that the JIT
+  /// optimizes during calibration gets faster, so one measurement can be
+  /// too high.
+  Future<int> _calibrate(int k, Duration minSampleTime) async {
+    if (minSampleTime == Duration.zero) return 1;
+    final fn = implementations[k].fn;
+    final target =
+        minSampleTime.inMicroseconds * Stopwatch().frequency / 1000000;
+    var passes = 1;
+    var reached = 0;
+    while (true) {
+      final ticks = await _runPasses(fn, passes);
+      if (passes >= _maxPassesPerSample) return passes;
+      if (ticks >= target) {
+        if (++reached == 2) return passes;
+        continue;
+      }
+      reached = 0;
+      // Aim 10% over the target, growing 2x to 10x per step.
+      final estimate = ticks <= 0
+          ? passes * 10
+          : (target * 1.1 * passes / ticks).ceil();
+      passes = math.min(
+        _maxPassesPerSample,
+        estimate.clamp(passes * 2, passes * 10),
+      );
+    }
+  }
+
+  /// Measures all implementations across the full test suite. Each sample
+  /// of implementation `k` times `passes[k]` passes.
   ///
   /// The order of implementations is rotated each run to reduce bias from
   /// cache or VM effects.
-  Future<void> _benchmark(int runs, PerfReporter out) async {
+  Future<void> _benchmark(int runs, List<int> passes, PerfReporter out) async {
     final n = implementations.length;
+    final msPerTick = 1000 / Stopwatch().frequency;
 
     for (var run = 0; run < runs; run++) {
       final runIterationSw = Stopwatch()..start();
 
-      // Build a rotated order for this run to reduce ordering bias.
-      final order = List.generate(n, (k) => (k + run) % n);
-
-      final stopwatches = List.generate(n, (_) => Stopwatch());
-
-      for (final idx in order) {
-        final sw = stopwatches[idx]..start();
-        for (var input in testCases) {
-          await _invoke(implementations[idx].fn, input);
-        }
-        sw.stop();
-      }
-
-      for (var idx = 0; idx < n; idx++) {
-        implTimes[idx].add(stopwatches[idx].elapsedMicroseconds / 1000.0);
+      for (var j = 0; j < n; j++) {
+        // Rotate the order each run to reduce ordering bias.
+        final idx = (j + run) % n;
+        final ticks = await _runPasses(implementations[idx].fn, passes[idx]);
+        implTimes[idx].add(ticks * msPerTick / passes[idx]);
       }
 
       runIterationSw.stop();

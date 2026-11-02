@@ -28,7 +28,11 @@ void main() {
       implementation2: (n) async => n + n,
     );
     final lines = await captureOutput(
-      () => tester.run(warmupRuns: 2, benchmarkRuns: 3),
+      () => tester.run(
+        warmupRuns: 2,
+        benchmarkRuns: 3,
+        minSampleTime: Duration.zero,
+      ),
     );
     expect(calls, 3 + 2 + 9);
     expect(tester.impl1Times, hasLength(3));
@@ -183,7 +187,13 @@ void validationAndStateTests() {
     for (var i = 0; i < 2; i++) {
       current = <int>[];
       seen.add(current);
-      await captureOutput(() => tester.run(warmupRuns: 20, benchmarkRuns: 1));
+      await captureOutput(
+        () => tester.run(
+          warmupRuns: 20,
+          benchmarkRuns: 1,
+          minSampleTime: Duration.zero,
+        ),
+      );
     }
     expect(seen[0], seen[1]);
   });
@@ -203,7 +213,13 @@ void validationAndStateTests() {
         }),
       ],
     );
-    await captureOutput(() => tester.run(warmupRuns: 0, benchmarkRuns: 3));
+    await captureOutput(
+      () => tester.run(
+        warmupRuns: 0,
+        benchmarkRuns: 3,
+        minSampleTime: Duration.zero,
+      ),
+    );
     final times = tester.impl1Times;
     expect(times.first, greaterThan(times.last));
   });
@@ -216,7 +232,11 @@ void validationAndStateTests() {
       implementations: [PerfImpl('A', (n) => ++calls)],
     );
     final lines = await captureOutput(
-      () => tester.run(warmupRuns: 0, benchmarkRuns: 1),
+      () => tester.run(
+        warmupRuns: 0,
+        benchmarkRuns: 1,
+        minSampleTime: Duration.zero,
+      ),
     );
     final output = lines.join('\n');
     expect(output, isNot(contains('Verify')));

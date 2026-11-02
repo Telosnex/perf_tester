@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'encode.dart';
 import 'reporter.dart';
 import 'results.dart';
+import 'stats.dart';
 
 /// A [PerfReporter] that prints progress, a results table, timing
 /// histograms, and CPU profiles as text.
@@ -132,10 +133,55 @@ class ConsoleReporter extends PerfReporter {
   }
 
   @override
-  void benchmarkFinished(List<ImplResult> implementations) {
+  void benchmarkFinished(
+    List<ImplResult> implementations,
+    List<Comparison> comparisons,
+  ) {
+    _printPasses(implementations);
     _printStats(implementations);
+    _printComparisons(comparisons);
     _printVisualizations(implementations);
   }
+
+  /// Says how many passes each sample timed, if any sample timed more
+  /// than one.
+  void _printPasses(List<ImplResult> impls) {
+    if (impls.every((impl) => impl.passesPerSample == 1)) return;
+    _sub(
+      'Passes per sample: '
+      '${impls.map((impl) => '${impl.name} ${impl.passesPerSample}').join(', ')}'
+      ' (times are per pass).',
+    );
+  }
+
+  // ── Comparisons ───────────────────────────────────────────────────────
+
+  void _printComparisons(List<Comparison> comparisons) {
+    if (comparisons.isEmpty) return;
+    final level = comparisons.first.significanceLevel;
+    _print('');
+    _sub('Comparison (Mann-Whitney U, two-sided, α = $level):');
+    for (final c in comparisons) {
+      final prefix = '${c.implementationName} vs ${c.baselineName}: ';
+      _sub(switch (c.verdict) {
+        ComparisonVerdict.faster =>
+          '$prefix${_ratio(c.speedup)}x faster (median), ${_p(c.pValue)}',
+        ComparisonVerdict.slower =>
+          '$prefix${_ratio(1 / c.speedup)}x slower (median), ${_p(c.pValue)}',
+        ComparisonVerdict.noSignificantDifference =>
+          '${prefix}no significant difference, ${_p(c.pValue)}',
+        ComparisonVerdict.tooFewSamples =>
+          '${prefix}too few benchmark runs to compare '
+              '(need at least ${minimumSamplesFor(c.significanceLevel)})',
+      });
+    }
+  }
+
+  static String _ratio(double value) =>
+      value.isFinite ? value.toStringAsFixed(2) : 'n/a';
+
+  static String _p(double p) =>
+      p < 0.001 ? 'p < 0.001' : 'p = ${p.toStringAsFixed(3)}';
 
   @override
   void profileUnavailable(String reason) {

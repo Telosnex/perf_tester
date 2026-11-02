@@ -91,28 +91,37 @@ final class VerificationResult<Input, Output> {
 /// Benchmark samples and statistics for one implementation.
 ///
 /// Each sample is the time, in milliseconds, of one pass over all test
-/// cases.
+/// cases. A sample that timed several passes is divided by
+/// [passesPerSample].
 final class ImplResult {
   final String name;
 
-  /// Samples in milliseconds, in the order they were measured.
+  /// Samples in milliseconds per pass, in the order they were measured.
   final List<double> samples;
 
   /// Samples in milliseconds, in ascending order.
   final List<double> sortedSamples;
 
-  /// Number of test cases in each sample.
+  /// Number of test cases in one pass.
   final int casesPerSample;
 
+  /// Passes over all test cases timed together for each sample. More than
+  /// 1 when one pass is shorter than the minimum sample time.
+  final int passesPerSample;
+
+  /// Sum of [samples]: the time of one pass per sample. When
+  /// [passesPerSample] is more than 1, the benchmark took
+  /// `total * passesPerSample` milliseconds.
   final double total;
   final double mean;
 
-  /// Throws an [ArgumentError] if [samples] is empty or [casesPerSample]
-  /// is less than 1.
+  /// Throws an [ArgumentError] if [samples] is empty, or [casesPerSample]
+  /// or [passesPerSample] is less than 1.
   factory ImplResult({
     required String name,
     required List<double> samples,
     required int casesPerSample,
+    int passesPerSample = 1,
   }) {
     if (samples.isEmpty) {
       throw ArgumentError.value(samples, 'samples', 'Must not be empty');
@@ -120,12 +129,20 @@ final class ImplResult {
     if (casesPerSample < 1) {
       throw RangeError.value(casesPerSample, 'casesPerSample', 'Must be >= 1');
     }
+    if (passesPerSample < 1) {
+      throw RangeError.value(
+        passesPerSample,
+        'passesPerSample',
+        'Must be >= 1',
+      );
+    }
     final total = samples.fold(0.0, (sum, sample) => sum + sample);
     return ImplResult._(
       name: name,
       samples: List.unmodifiable(samples),
       sortedSamples: List.unmodifiable(List.of(samples)..sort()),
       casesPerSample: casesPerSample,
+      passesPerSample: passesPerSample,
       total: total,
       mean: total / samples.length,
     );
@@ -136,6 +153,7 @@ final class ImplResult {
     required this.samples,
     required this.sortedSamples,
     required this.casesPerSample,
+    required this.passesPerSample,
     required this.total,
     required this.mean,
   });
@@ -165,6 +183,71 @@ final class ImplResult {
   /// Test cases completed per second, across all samples.
   /// [double.infinity] if [total] is zero.
   double get opsPerSecond => samples.length * casesPerSample / total * 1000;
+}
+
+enum ComparisonVerdict {
+  /// The implementation is significantly faster than the baseline.
+  faster,
+
+  /// The implementation is significantly slower than the baseline.
+  slower,
+
+  /// The samples overlap too much to say which is faster.
+  noSignificantDifference,
+
+  /// There are too few samples for any result to be significant. See
+  /// [Comparison.significanceLevel].
+  tooFewSamples,
+}
+
+/// How one implementation's timing compares to the baseline's.
+///
+/// [verdict] comes from a two-sided Mann-Whitney U test on the samples.
+/// The test does not assume the samples follow a normal distribution, and
+/// a few outliers do not change it much. Each implementation is tested
+/// against the baseline separately, with no correction for multiple
+/// comparisons.
+///
+/// The test treats samples from one process as independent. Under the JIT
+/// (`dart run`, `flutter test`), how the compiler lays out each function
+/// can make identical code differ by up to 1.5x for the whole process, and
+/// the test reports that difference as significant. To confirm a result,
+/// run it again in a new process, or compile with `dart compile exe`.
+final class Comparison {
+  final String baselineName;
+  final String implementationName;
+
+  /// Baseline median divided by this implementation's median. More than 1
+  /// means this implementation has the lower median.
+  final double speedup;
+
+  /// The chance that a random sample of this implementation is faster than
+  /// a random sample of the baseline, from 0 to 1. Ties count as half.
+  /// [double.nan] if the verdict is [ComparisonVerdict.tooFewSamples].
+  final double probabilityFaster;
+
+  /// Two-sided p-value. [double.nan] if the verdict is
+  /// [ComparisonVerdict.tooFewSamples].
+  final double pValue;
+
+  /// The p-value below which a difference is significant.
+  final double significanceLevel;
+
+  final ComparisonVerdict verdict;
+
+  const Comparison({
+    required this.baselineName,
+    required this.implementationName,
+    required this.speedup,
+    required this.probabilityFaster,
+    required this.pValue,
+    required this.significanceLevel,
+    required this.verdict,
+  });
+
+  bool get isSignificant =>
+      verdict == ComparisonVerdict.faster ||
+      verdict == ComparisonVerdict.slower;
 }
 
 /// Whether CPU profiling ran.
@@ -256,6 +339,10 @@ final class PerfResult<Input, Output> {
   /// entry is the baseline.
   final List<ImplResult> implementations;
 
+  /// Each implementation after the first, compared to the baseline. Empty
+  /// with one implementation.
+  final List<Comparison> comparisons;
+
   final VerificationResult<Input, Output> verification;
 
   final ProfileStatus profileStatus;
@@ -274,11 +361,13 @@ final class PerfResult<Input, Output> {
     required this.warmupRuns,
     required this.benchmarkRuns,
     required List<ImplResult> implementations,
+    List<Comparison> comparisons = const [],
     required this.verification,
     required this.profileStatus,
     this.profileUnavailableReason,
     List<ProfileResult> profiles = const [],
   }) : implementations = List.unmodifiable(implementations),
+       comparisons = List.unmodifiable(comparisons),
        profiles = List.unmodifiable(profiles);
 
   ImplResult get baseline => implementations.first;

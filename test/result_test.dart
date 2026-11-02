@@ -45,8 +45,10 @@ class RecordingReporter extends PerfReporter {
       events.add('benchmarkProgress $completedRuns/$totalRuns');
 
   @override
-  void benchmarkFinished(List<ImplResult> implementations) =>
-      events.add('benchmarkFinished');
+  void benchmarkFinished(
+    List<ImplResult> implementations,
+    List<Comparison> comparisons,
+  ) => events.add('benchmarkFinished');
 
   @override
   void profileUnavailable(String reason) => events.add('profileUnavailable');
@@ -288,6 +290,217 @@ void main() {
     );
   });
 
+  group('timing', () {
+    test('fast implementations time several passes per sample', () async {
+      final result = await PerfTester<int, int>(
+        testName: 'batch',
+        testCases: [1, 2, 3],
+        implementation1: (n) => n,
+        implementation2: (n) async {
+          await Future<void>.delayed(const Duration(milliseconds: 3));
+          return n;
+        },
+      ).run(warmupRuns: 0, benchmarkRuns: 4, reporter: const SilentReporter());
+      final [fast, slow] = result.implementations;
+      expect(fast.passesPerSample, greaterThan(1));
+      expect(slow.passesPerSample, 1);
+      // Samples are per pass, so a fast pass is far below the 1 ms target.
+      expect(fast.median, lessThan(0.5));
+      // 3 cases × >= 3 ms each.
+      expect(slow.min, greaterThanOrEqualTo(9));
+    });
+
+    test('each sample takes at least minSampleTime', () async {
+      final result =
+          await PerfTester<int, int>.multi(
+            testName: 'target',
+            testCases: [1],
+            implementations: [PerfImpl('A', (n) => n * 3)],
+          ).run(
+            warmupRuns: 0,
+            benchmarkRuns: 5,
+            minSampleTime: const Duration(milliseconds: 2),
+            reporter: const SilentReporter(),
+          );
+      final impl = result.baseline;
+      // Calibration aims 10% over the target. Leave room for noise.
+      expect(impl.median * impl.passesPerSample, greaterThan(1.2));
+    });
+
+    test('minSampleTime zero times one pass per sample', () async {
+      var calls = 0;
+      final result =
+          await PerfTester<int, int>.multi(
+            testName: 'one pass',
+            testCases: [1, 2],
+            implementations: [PerfImpl('A', (n) => n + ++calls)],
+          ).run(
+            warmupRuns: 0,
+            benchmarkRuns: 3,
+            minSampleTime: Duration.zero,
+            reporter: const SilentReporter(),
+          );
+      expect(result.baseline.passesPerSample, 1);
+      expect(calls, 6);
+    });
+
+    test('synchronous results are not awaited', () async {
+      // A microtask runs only when the benchmark suspends. Suspending
+      // between batches is expected; suspending between calls is not.
+      var calls = 0;
+      var suspensions = 0;
+      var pending = false;
+      final tester = PerfTester<int, int>.multi(
+        testName: 'sync',
+        testCases: [1, 2, 3],
+        implementations: [
+          PerfImpl('A', (n) {
+            calls++;
+            if (!pending) {
+              pending = true;
+              scheduleMicrotask(() {
+                pending = false;
+                suspensions++;
+              });
+            }
+            return n;
+          }),
+        ],
+      );
+      final result = await tester.run(
+        warmupRuns: 0,
+        benchmarkRuns: 3,
+        reporter: const SilentReporter(),
+      );
+      expect(result.baseline.passesPerSample, greaterThan(10));
+      expect(calls, greaterThan(100));
+      // A few calibration batches plus 3 benchmark batches.
+      expect(suspensions, lessThan(20));
+    });
+
+    test('rejects a negative minSampleTime or bad significanceLevel', () {
+      final tester = PerfTester<int, int>.multi(
+        testName: 'bad',
+        testCases: [1],
+        implementations: [PerfImpl('A', (n) => n)],
+      );
+      expect(
+        () => tester.run(minSampleTime: const Duration(microseconds: -1)),
+        throwsRangeError,
+      );
+      for (final level in [0.0, 1.0, -0.1, double.nan]) {
+        expect(
+          () => tester.run(significanceLevel: level),
+          throwsRangeError,
+          reason: '$level',
+        );
+      }
+    });
+  });
+
+  group('comparisons', () {
+    test('a clearly slower implementation is reported as slower', () async {
+      final result = await PerfTester<int, int>(
+        testName: 'slower',
+        testCases: [1],
+        implementation1: (n) => n,
+        implementation2: (n) async {
+          await Future<void>.delayed(const Duration(milliseconds: 2));
+          return n;
+        },
+      ).run(warmupRuns: 0, benchmarkRuns: 6, reporter: const SilentReporter());
+      final c = result.comparisons.single;
+      expect(c.baselineName, 'Original');
+      expect(c.implementationName, 'Optimized');
+      expect(c.verdict, ComparisonVerdict.slower);
+      expect(c.isSignificant, isTrue);
+      expect(c.speedup, lessThan(1));
+      expect(c.probabilityFaster, 0);
+      // All 6 baseline samples below all 6: the smallest possible p.
+      expect(c.pValue, closeTo(minimumPValue(6, 6), 1e-12));
+    });
+
+    test('three runs are too few to compare', () async {
+      final result = await PerfTester<int, int>(
+        testName: 'few',
+        testCases: [1],
+        implementation1: (n) => n,
+        implementation2: (n) => n,
+      ).run(warmupRuns: 0, benchmarkRuns: 3, reporter: const SilentReporter());
+      final c = result.comparisons.single;
+      expect(c.verdict, ComparisonVerdict.tooFewSamples);
+      expect(c.isSignificant, isFalse);
+      expect(c.pValue, isNaN);
+    });
+
+    test('one comparison per implementation after the baseline', () async {
+      final result = await PerfTester<int, int>.multi(
+        testName: 'multi',
+        testCases: [1],
+        implementations: [
+          PerfImpl('A', (n) => n),
+          PerfImpl('B', (n) => n),
+          PerfImpl('C', (n) => n),
+        ],
+      ).run(warmupRuns: 0, benchmarkRuns: 4, reporter: const SilentReporter());
+      expect(
+        [
+          for (final c in result.comparisons)
+            (c.baselineName, c.implementationName),
+        ],
+        [('A', 'B'), ('A', 'C')],
+      );
+    });
+
+    test('ConsoleReporter prints each verdict', () async {
+      final written = <String>[];
+      await PerfTester<int, int>.multi(
+        testName: 'printed',
+        testCases: [1],
+        implementations: [
+          PerfImpl('Fast', (n) => n),
+          PerfImpl('Slow', (n) async {
+            await Future<void>.delayed(const Duration(milliseconds: 2));
+            return n;
+          }),
+        ],
+      ).run(
+        warmupRuns: 0,
+        benchmarkRuns: 5,
+        reporter: ConsoleReporter(printLine: written.add),
+      );
+      final output = written.join('\n');
+      expect(
+        output,
+        contains('Comparison (Mann-Whitney U, two-sided, α = 0.05):'),
+      );
+      expect(
+        output,
+        matches(RegExp(r'Slow vs Fast: [\d.]+x slower \(median\), p = 0\.008')),
+      );
+      expect(output, contains('Passes per sample: Fast '));
+
+      written.clear();
+      await PerfTester<int, int>(
+        testName: 'few',
+        testCases: [1],
+        implementation1: (n) => n,
+        implementation2: (n) => n,
+      ).run(
+        warmupRuns: 0,
+        benchmarkRuns: 2,
+        reporter: ConsoleReporter(printLine: written.add),
+      );
+      expect(
+        written,
+        contains(
+          '      Optimized vs Original: too few benchmark runs to compare '
+          '(need at least 4)',
+        ),
+      );
+    });
+  });
+
   group('reporters', () {
     test('events arrive in the documented order', () async {
       final reporter = RecordingReporter();
@@ -335,7 +548,7 @@ void main() {
         testCases: [1],
         implementations: [
           PerfImpl('A', (n) {
-            // Throw on the first benchmark call, after 1 warmup call.
+            // Throw on the first call after the 1 warmup call.
             if (++calls > 1) throw StateError('boom');
             return n;
           }),

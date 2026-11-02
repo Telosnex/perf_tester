@@ -2,7 +2,7 @@
 //
 // Uses the returned PerfResult instead of the printed report: the script
 // prints one line and sets a failing exit code if the candidate gives
-// different output or is slower than the baseline.
+// different output or is not significantly faster than the baseline.
 import 'dart:io';
 
 import 'package:perf_tester/perf_tester.dart';
@@ -40,15 +40,22 @@ Future<void> main() async {
     return;
   }
 
-  final [baseline, candidate] = result.implementations;
-  final ratio = baseline.median / candidate.median;
+  final comparison = result.comparisons.single;
+  final summary = switch (comparison.verdict) {
+    ComparisonVerdict.faster =>
+      '${comparison.speedup.toStringAsFixed(2)}x faster',
+    ComparisonVerdict.slower =>
+      '${(1 / comparison.speedup).toStringAsFixed(2)}x slower',
+    ComparisonVerdict.noSignificantDifference => 'no significant difference',
+    ComparisonVerdict.tooFewSamples => 'too few runs to compare',
+  };
+  final p = comparison.pValue;
   print(
-    '${candidate.name}: ${ratio.toStringAsFixed(2)}x the speed of '
-    '${baseline.name} (median ${candidate.median.toStringAsFixed(3)} ms '
-    'vs ${baseline.median.toStringAsFixed(3)} ms)',
+    '${comparison.implementationName} vs ${comparison.baselineName}: '
+    '$summary (${p < 0.001 ? 'p < 0.001' : 'p = ${p.toStringAsFixed(3)}'})',
   );
-  if (ratio < 1) {
-    stderr.writeln('FAIL: ${candidate.name} is slower');
+  if (comparison.verdict != ComparisonVerdict.faster) {
+    stderr.writeln('FAIL: ${comparison.implementationName} is not faster');
     exitCode = 1;
   }
 }

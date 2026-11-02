@@ -39,7 +39,11 @@ abstract class PerfReporter {
   /// the run that just finished, across all implementations.
   void benchmarkProgress(int completedRuns, int totalRuns, Duration elapsed) {}
 
-  void benchmarkFinished(List<ImplResult> implementations) {}
+  /// [comparisons] has one entry per implementation after the first.
+  void benchmarkFinished(
+    List<ImplResult> implementations,
+    List<Comparison> comparisons,
+  ) {}
 
   /// Profiling was requested, but the VM service could not be used.
   void profileUnavailable(String reason) {}
