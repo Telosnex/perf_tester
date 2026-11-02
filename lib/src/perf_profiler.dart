@@ -29,9 +29,7 @@ class PerfProfiler {
     try {
       // getInfo() reads existing state without blocking (controlWebServer
       // hangs in the Flutter tester even with --enable-vmservice).
-      print('[PerfProfiler] Calling Service.getInfo()...');
       final info = await developer.Service.getInfo();
-      print('[PerfProfiler] getInfo returned: ${info.serverUri}');
       final uri = info.serverUri;
       if (uri == null) {
         print(
@@ -60,14 +58,16 @@ class PerfProfiler {
       _isolateId = developer.Service.getIsolateId(isolate.Isolate.current);
       if (_isolateId == null) {
         print('[PerfProfiler] Could not determine isolate ID.');
-        await _service?.dispose();
-        _service = null;
+        await dispose();
         return false;
       }
 
       return true;
     } catch (e) {
       print('[PerfProfiler] Failed to connect: $e');
+      // An open connection keeps the process alive; close it if setFlag or
+      // a later step failed after connecting.
+      await dispose();
       return false;
     }
   }
@@ -263,10 +263,20 @@ class PerfProfiler {
     );
   }
 
-  /// Disconnect from the VM service.
+  /// Disconnect from the VM service. Safe to call more than once, and safe
+  /// to call when [connect] failed or was never called.
   Future<void> dispose() async {
-    await _service?.dispose();
+    final service = _service;
     _service = null;
+    _isolateId = null;
+    _captured = null;
+    if (service == null) return;
+    try {
+      await service.dispose();
+    } catch (_) {
+      // The connection is unusable either way; do not hide the caller's
+      // original error behind a cleanup error.
+    }
   }
 
   String _functionName(ProfileFunction pf) {

@@ -109,11 +109,14 @@ class PerfTester<Input, Output> {
   /// Optional custom equality check for result comparison.
   final bool Function(Output?, Output?)? equalityCheck;
 
-  /// Stable RNG used to select warmup inputs reproducibly.
-  final _random = math.Random(42);
+  /// Seed for selecting warmup inputs. Each [run] starts a new generator
+  /// with this seed, so repeated runs warm up with the same inputs.
+  static const _warmupSeed = 42;
 
-  /// Measured runtime samples per implementation, in milliseconds.
-  /// Index corresponds to [implementations] index.
+  /// Measured runtime samples per implementation, in milliseconds, in the
+  /// order they were measured. Index corresponds to [implementations] index.
+  ///
+  /// Each [run] clears the samples from the previous run.
   late final List<List<double>> implTimes = List.generate(
     implementations.length,
     (_) => <double>[],
@@ -121,8 +124,19 @@ class PerfTester<Input, Output> {
 
   // Legacy accessors for 2-impl callers.
   List<double> get impl1Times => implTimes[0];
-  List<double> get impl2Times =>
-      implTimes.length > 1 ? implTimes[1] : implTimes[0];
+
+  /// Samples for the second implementation.
+  ///
+  /// Throws a [StateError] if there is only one implementation.
+  List<double> get impl2Times {
+    if (implTimes.length < 2) {
+      throw StateError(
+        'impl2Times needs at least 2 implementations; '
+        'this tester has ${implTimes.length}.',
+      );
+    }
+    return implTimes[1];
+  }
 
   /// Original constructor: compares exactly two implementations.
   PerfTester({
@@ -145,7 +159,15 @@ class PerfTester<Input, Output> {
     required this.testCases,
     required this.implementations,
     this.equalityCheck,
-  }) : assert(implementations.isNotEmpty, 'Need at least 1 implementation');
+  }) {
+    if (implementations.isEmpty) {
+      throw ArgumentError.value(
+        implementations,
+        'implementations',
+        'Need at least 1 implementation',
+      );
+    }
+  }
 
   // ── Output helpers ──────────────────────────────────────────────────
 
@@ -222,7 +244,12 @@ class PerfTester<Input, Output> {
   ///
   /// [profileSaveDir], when set, additionally writes each implementation's
   /// samples as DevTools cpu-profiler JSON to
-  /// `<profileSaveDir>/cpu_profile_<implName>.json` for offline analysis.
+  /// `<profileSaveDir>/cpu_profile_<testName>__<implName>.json` for offline
+  /// analysis. See [profileFileNames].
+  ///
+  /// Throws an [ArgumentError] if [testCases] is empty, [warmupRuns] is
+  /// negative, or [benchmarkRuns] is less than 1. When [profile] is true,
+  /// [profileRuns] must be at least 1 and [profileTopN] must not be negative.
   Future<void> run({
     int warmupRuns = 100,
     int benchmarkRuns = 100,
@@ -240,12 +267,33 @@ class PerfTester<Input, Output> {
     })?
     runAsync,
   }) async {
-    final totalSteps = 2 + (skipEqualityCheck ? 0 : 1) + (profile ? 1 : 0);
+    if (testCases.isEmpty) {
+      throw ArgumentError.value(testCases, 'testCases', 'Must not be empty');
+    }
+    RangeError.checkNotNegative(warmupRuns, 'warmupRuns');
+    if (benchmarkRuns < 1) {
+      throw RangeError.value(benchmarkRuns, 'benchmarkRuns', 'Must be >= 1');
+    }
+    if (profile) {
+      if (profileRuns < 1) {
+        throw RangeError.value(profileRuns, 'profileRuns', 'Must be >= 1');
+      }
+      RangeError.checkNotNegative(profileTopN, 'profileTopN');
+    }
+
+    // Each run is independent of earlier runs.
+    for (final times in implTimes) {
+      times.clear();
+    }
+
+    // With one implementation there is nothing to compare against.
+    final verify = !skipEqualityCheck && implementations.length > 1;
+    final totalSteps = 2 + (verify ? 1 : 0) + (profile ? 1 : 0);
     var step = 0;
 
     _header(testName);
     final steps = [
-      if (!skipEqualityCheck) 'Verify',
+      if (verify) 'Verify',
       'Warmup',
       'Benchmark',
       if (profile) 'Profile (×${implementations.length})',
@@ -255,7 +303,7 @@ class PerfTester<Input, Output> {
     print(_ruleSingle);
 
     // ── Verify ──
-    if (!skipEqualityCheck) {
+    if (verify) {
       step++;
       _step(
         step,
@@ -272,7 +320,7 @@ class PerfTester<Input, Output> {
       totalSteps,
       'Warmup: $warmupRuns randomly selected test case${warmupRuns == 1 ? '' : 's'}...',
     );
-    await _warmup(warmupRuns);
+    await _warmup(warmupRuns, math.Random(_warmupSeed));
 
     // ── Benchmark ──
     step++;
@@ -297,41 +345,52 @@ class PerfTester<Input, Output> {
       }
 
       final profiler = PerfProfiler();
-      final connected = await io(profiler.connect) ?? false;
-      if (connected) {
-        _step(
-          step,
-          totalSteps,
-          'Profile: running each implementation separately...',
-        );
-        for (final impl in implementations) {
-          await io(profiler.clearSamples);
-          for (int r = 0; r < profileRuns; r++) {
-            for (final input in testCases) {
-              await _invoke(impl.fn, input);
+      try {
+        final connected = await io(profiler.connect) ?? false;
+        if (connected) {
+          _step(
+            step,
+            totalSteps,
+            'Profile: running each implementation separately...',
+          );
+          final fileNames = profileFileNames(
+            testName,
+            implementations.map((impl) => impl.name).toList(),
+          );
+          for (var k = 0; k < implementations.length; k++) {
+            final impl = implementations[k];
+            await io(profiler.clearSamples);
+            for (int r = 0; r < profileRuns; r++) {
+              for (final input in testCases) {
+                await _invoke(impl.fn, input);
+              }
+            }
+            // One snapshot, shared by the printed table and the saved JSON:
+            // fetching twice makes the second fetch profile the first.
+            await io(profiler.capture);
+            await io(
+              () =>
+                  profiler.collectAndPrint(topN: profileTopN, label: impl.name),
+            );
+            if (profileSaveDir != null) {
+              await io(
+                () => profiler.saveAsDevToolsJson(
+                  '$profileSaveDir/${fileNames[k]}',
+                ),
+              );
             }
           }
-          // One snapshot, shared by the printed table and the saved JSON:
-          // fetching twice makes the second fetch profile the first.
-          await io(profiler.capture);
-          await io(
-            () => profiler.collectAndPrint(topN: profileTopN, label: impl.name),
+        } else {
+          _step(
+            step,
+            totalSteps,
+            'Profile: skipped (VM service not available).',
           );
-          if (profileSaveDir != null) {
-            final safeName = impl.name.replaceAll(
-              RegExp(r'[^A-Za-z0-9_-]'),
-              '_',
-            );
-            await io(
-              () => profiler.saveAsDevToolsJson(
-                '$profileSaveDir/cpu_profile_$safeName.json',
-              ),
-            );
-          }
         }
+      } finally {
+        // An open VM service connection keeps the process alive, so close it
+        // even when an implementation throws.
         await io(profiler.dispose);
-      } else {
-        _step(step, totalSteps, 'Profile: skipped (VM service not available).');
       }
     }
   }
@@ -390,10 +449,10 @@ class PerfTester<Input, Output> {
 
   /// Performs a short warmup using random test cases to reduce cold-start
   /// effects before the timed benchmark begins.
-  Future<void> _warmup(int runs) async {
+  Future<void> _warmup(int runs, math.Random random) async {
     final sw = Stopwatch()..start();
     for (var i = 0; i < runs; i++) {
-      final input = testCases[_random.nextInt(testCases.length)];
+      final input = testCases[random.nextInt(testCases.length)];
       for (final impl in implementations) {
         await _invoke(impl.fn, input);
       }
@@ -466,17 +525,17 @@ class PerfTester<Input, Output> {
   void _printStats() {
     final n = implementations.length;
 
-    // Sort each timing list for percentile calculations.
-    for (final times in implTimes) {
-      times.sort();
-    }
+    // Sort copies for percentile calculations; implTimes keeps run order.
+    final sortedTimes = [for (final times in implTimes) List.of(times)..sort()];
 
     double mean(List<double> list) =>
         list.reduce((a, b) => a + b) / list.length;
     double median(List<double> list) => list.length.isOdd
         ? list[list.length ~/ 2]
         : (list[list.length ~/ 2 - 1] + list[list.length ~/ 2]) / 2;
+    // Sample standard deviation is undefined for fewer than 2 samples.
     double stdDev(List<double> list, double m) {
+      if (list.length < 2) return double.nan;
       var squaredDiffs = list.map((x) => math.pow(x - m, 2));
       return math.sqrt(
         squaredDiffs.reduce((a, b) => a + b) / (list.length - 1),
@@ -491,7 +550,7 @@ class PerfTester<Input, Output> {
     final opsPerSecs = <double>[];
 
     for (var k = 0; k < n; k++) {
-      final times = implTimes[k];
+      final times = sortedTimes[k];
       final m = mean(times);
       means.add(m);
       medians.add(median(times));
@@ -504,7 +563,9 @@ class PerfTester<Input, Output> {
 
     // Helper function to format numbers intelligently
     String formatNumber(double value) {
-      if (value >= 1000000) {
+      if (!value.isFinite) {
+        return 'n/a';
+      } else if (value >= 1000000) {
         return '${(value / 1000000).toStringAsFixed(2)}M';
       } else if (value >= 1000) {
         return '${(value / 1000).toStringAsFixed(2)}K';
@@ -521,8 +582,8 @@ class PerfTester<Input, Output> {
     final metrics = {
       'Total Time (ms)': totals,
       'Ops/Second': opsPerSecs,
-      'Min (ms)': [for (var k = 0; k < n; k++) implTimes[k].first],
-      'Max (ms)': [for (var k = 0; k < n; k++) implTimes[k].last],
+      'Min (ms)': [for (var k = 0; k < n; k++) sortedTimes[k].first],
+      'Max (ms)': [for (var k = 0; k < n; k++) sortedTimes[k].last],
       'Median (ms)': medians,
       'Mean (ms)': means,
       'Std Dev (ms)': stdDevs,
@@ -539,7 +600,9 @@ class PerfTester<Input, Output> {
       var maxW = names[k].length;
       for (final vals in metrics.values) {
         final v = vals[k];
-        final formatted = v >= 1000 ? formatNumber(v) : v.toStringAsFixed(3);
+        final formatted = v >= 1000 || !v.isFinite
+            ? formatNumber(v)
+            : v.toStringAsFixed(3);
         if (formatted.length > maxW) maxW = formatted.length;
       }
       colWidths.add(maxW + 2);
@@ -565,7 +628,7 @@ class PerfTester<Input, Output> {
     }) {
       final buf = StringBuffer(label.padRight(maxLabelWidth));
       for (var k = 0; k < n; k++) {
-        final formatted = formatLarge
+        final formatted = formatLarge || !vals[k].isFinite
             ? formatNumber(vals[k])
             : vals[k].toStringAsFixed(3);
         buf.write(formatted.padRight(colWidths[k]));
@@ -577,6 +640,15 @@ class PerfTester<Input, Output> {
         // ignore: avoid-accessing-collections-by-constant-index
         final baseVal = vals[0];
         final implVal = vals[k];
+
+        // A ratio needs two finite, nonzero values.
+        if (!baseVal.isFinite ||
+            !implVal.isFinite ||
+            baseVal == 0 ||
+            implVal == 0) {
+          comparisons.add('${names[k]}: n/a');
+          continue;
+        }
 
         var improvement = ((baseVal - implVal) / baseVal * 100);
         var speedupFactor = baseVal / implVal;
@@ -738,6 +810,28 @@ class PerfTester<Input, Output> {
       );
     }
   }
+}
+
+/// Returns one DevTools profile file name per entry in [implNames].
+///
+/// Names include the sanitized [testName], so testers that save to the same
+/// directory do not overwrite each other. If two implementation names
+/// sanitize to the same file name, later ones get a numeric suffix.
+List<String> profileFileNames(String testName, List<String> implNames) {
+  String sanitize(String name) =>
+      name.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '_');
+  final used = <String>{};
+  return [
+    for (final implName in implNames)
+      () {
+        final base = 'cpu_profile_${sanitize(testName)}__${sanitize(implName)}';
+        var candidate = base;
+        for (var i = 2; !used.add(candidate.toLowerCase()); i++) {
+          candidate = '${base}_$i';
+        }
+        return '$candidate.json';
+      }(),
+  ];
 }
 
 /// Encodes a value for comparison, falling back to `toString()` if JSON

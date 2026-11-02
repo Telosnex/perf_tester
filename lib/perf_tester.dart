@@ -6,5 +6,5 @@
 /// not throw. Supply equalityCheck for values that need custom comparison.
 library;
 
-export 'src/perf_tester.dart' show PerfImpl, PerfTester;
+export 'src/perf_tester.dart' show PerfImpl, PerfTester, profileFileNames;
 export 'src/perf_profiler.dart' show PerfProfiler;

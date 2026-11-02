@@ -1,5 +1,5 @@
 // Run: dart run --enable-vm-service=0 example/cpu_profile.dart
-// Profiles are written to profiles/cpu_profile_Prime_count.json.
+// Profiles are written to profiles/cpu_profile_Prime_counting_CPU_profile__Prime_count.json.
 // Without the VM service, the benchmark runs but profiling is skipped.
 import 'package:perf_tester/perf_tester.dart';
 
