@@ -1,5 +1,3 @@
-// ignore_for_file: avoid_print
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
@@ -8,6 +6,8 @@ import 'dart:isolate' as isolate;
 
 import 'package:vm_service/vm_service.dart';
 import 'package:vm_service/vm_service_io.dart';
+
+import 'results.dart';
 
 /// Connects to the VM service running in *this* process and collects CPU
 /// profiling samples around a user-supplied block.
@@ -18,24 +18,32 @@ import 'package:vm_service/vm_service_io.dart';
 /// ```
 ///
 /// If the VM service isn't available (e.g. normal `dart run` without the
-/// flag), [connect] returns `false` and the other methods are no-ops.
+/// flag), [connect] returns `false`, [unavailableReason] says why, and the
+/// other methods are no-ops.
+///
+/// This class does not print. [PerfTester.run] passes its results to a
+/// [PerfReporter].
 class PerfProfiler {
   VmService? _service;
   String? _isolateId;
   CpuSamples? _captured;
+  String? _unavailableReason;
+
+  /// Why the last [connect] failed. Null if it succeeded or was not called.
+  String? get unavailableReason => _unavailableReason;
 
   /// Try to connect to the VM service. Returns `true` on success.
   Future<bool> connect() async {
+    _unavailableReason = null;
     try {
       // getInfo() reads existing state without blocking (controlWebServer
       // hangs in the Flutter tester even with --enable-vmservice).
       final info = await developer.Service.getInfo();
       final uri = info.serverUri;
       if (uri == null) {
-        print(
-          '[PerfProfiler] VM service not available. '
-          'Run with: dart run --enable-vm-service <script>',
-        );
+        _unavailableReason =
+            'VM service not available. '
+            'Run with: dart run --enable-vm-service <script>';
         return false;
       }
 
@@ -57,17 +65,17 @@ class PerfProfiler {
       // Get our own isolate ID.
       _isolateId = developer.Service.getIsolateId(isolate.Isolate.current);
       if (_isolateId == null) {
-        print('[PerfProfiler] Could not determine isolate ID.');
         await dispose();
+        _unavailableReason = 'Could not determine isolate ID.';
         return false;
       }
 
       return true;
     } catch (e) {
-      print('[PerfProfiler] Failed to connect: $e');
       // An open connection keeps the process alive; close it if setFlag or
       // a later step failed after connecting.
       await dispose();
+      _unavailableReason = 'Failed to connect: $e';
       return false;
     }
   }
@@ -81,7 +89,7 @@ class PerfProfiler {
   }
 
   /// Fetch the samples accumulated since [clearSamples] **once**, caching them
-  /// for [collectAndPrint] and [saveAsDevToolsJson].
+  /// for [summarize] and [saveAsDevToolsJson].
   ///
   /// Both consumers must analyse the *same* snapshot. A `getCpuSamples`
   /// round-trip is itself expensive Dart work in this isolate — the VM
@@ -97,18 +105,32 @@ class PerfProfiler {
     return _captured = await _service!.getCpuSamples(_isolateId!, 0, ~0);
   }
 
-  /// Collect CPU samples and print the top-N hottest functions.
-  Future<void> collectAndPrint({int topN = 20, String? label}) async {
-    if (_service == null || _isolateId == null) return;
+  /// Summarizes the captured samples: the [topN] functions with the most
+  /// self time, highest first. Functions with no ticks are left out.
+  ///
+  /// Uses the snapshot from [capture], and calls [capture] if there is no
+  /// snapshot yet. Returns null if not connected.
+  Future<ProfileResult?> summarize({
+    required String implementationName,
+    int topN = 20,
+    ProfileFile? savedFile,
+  }) async {
+    if (_service == null || _isolateId == null) return null;
 
     final cpuSamples = _captured ?? await capture();
-    if (cpuSamples == null) return;
-    final functions = cpuSamples.functions ?? [];
-    final samples = cpuSamples.samples ?? [];
+    if (cpuSamples == null) return null;
+    final functions = cpuSamples.functions ?? const <ProfileFunction>[];
+    final samples = cpuSamples.samples ?? const <CpuSample>[];
+    final period = cpuSamples.samplePeriod ?? 0; // microseconds
 
     if (samples.isEmpty) {
-      print('\n[PerfProfiler] No CPU samples collected.');
-      return;
+      return ProfileResult(
+        implementationName: implementationName,
+        sampleCount: 0,
+        samplePeriodMicros: period,
+        topFunctions: const [],
+        savedFile: savedFile,
+      );
     }
 
     // Sort by exclusive ticks (self time) descending.
@@ -116,65 +138,36 @@ class PerfProfiler {
       functions,
     )..sort((a, b) => (b.exclusiveTicks ?? 0).compareTo(a.exclusiveTicks ?? 0));
 
-    final totalSamples = cpuSamples.sampleCount ?? samples.length;
-    final period = cpuSamples.samplePeriod ?? 0; // microseconds
-
-    final title = label != null
-        ? 'CPU Profile: $label  ($totalSamples samples, $periodµs)'
-        : 'CPU Profile  ($totalSamples samples, $periodµs)';
-    final boxWidth = title.length + 4;
-    print('');
-    print('      ┌${'─' * boxWidth}┐');
-    print('      │  $title  │');
-    print('      └${'─' * boxWidth}┘');
-    print(
-      '      Self% = time in function itself.  '
-      'Incl% = time in function + everything it calls.',
-    );
-    print(
-      '      [Stub] = compiler-generated helpers '
-      '(type checks, allocation, etc.).',
-    );
-    print('');
-    print(
-      '      ${'Self%'.padRight(8)}'
-      '${'Incl%'.padRight(8)}'
-      '${'Self'.padRight(8)}'
-      '${'Incl'.padRight(8)}'
-      'Function',
-    );
-    print('      ${'─' * 8}${'─' * 8}${'─' * 8}${'─' * 8}${'─' * 40}');
-
-    var printed = 0;
+    final top = <ProfileEntry>[];
     for (final pf in sorted) {
-      if (printed >= topN) break;
+      if (top.length >= topN) break;
       final excl = pf.exclusiveTicks ?? 0;
       final incl = pf.inclusiveTicks ?? 0;
       if (excl == 0 && incl == 0) continue;
-
-      final exclPct = (excl / totalSamples * 100).toStringAsFixed(1);
-      final inclPct = (incl / totalSamples * 100).toStringAsFixed(1);
-
-      // Extract a readable function name.
-      final funcName = _functionName(pf);
-      final url = pf.resolvedUrl ?? '';
-      // Shorten the URL to just the filename.
-      final shortUrl = url.contains('/') ? url.split('/').last : url;
-
-      print(
-        '      ${exclPct.padLeft(5)}%  '
-        '${inclPct.padLeft(5)}%  '
-        '${excl.toString().padLeft(6)}  '
-        '${incl.toString().padLeft(6)}  '
-        '$funcName ($shortUrl)',
+      top.add(
+        ProfileEntry(
+          name: _functionName(pf),
+          url: pf.resolvedUrl ?? '',
+          selfTicks: excl,
+          inclusiveTicks: incl,
+        ),
       );
-      printed++;
     }
+
+    return ProfileResult(
+      implementationName: implementationName,
+      sampleCount: cpuSamples.sampleCount ?? samples.length,
+      samplePeriodMicros: period,
+      topFunctions: top,
+      savedFile: savedFile,
+    );
   }
 
   /// Dump the currently collected CPU samples in DevTools'
-  /// `cpu-profiler` JSON shape to [path], so the file can be fed
-  /// straight into `lib/features/debug_inspector/perf.py`.
+  /// `cpu-profiler` JSON shape to [path], for loading into DevTools or an
+  /// offline analysis script.
+  ///
+  /// Returns what was written, or null if not connected.
   ///
   /// The DevTools schema expects an interned stackFrame tree where each
   /// node carries `{name, resolvedUrl, packageUri?, parent?}` and each
@@ -185,16 +178,14 @@ class PerfProfiler {
   ///
   /// Note: `sourceLine` is omitted — the VM service returns function
   /// metadata without locations unless we fetch each `Func` individually,
-  /// which would balloon into thousands of extra RPC round-trips. The
-  /// perf.py analyser tolerates a missing `sourceLine` field and just
-  /// skips the `Lnnn` column in those rows.
-  Future<void> saveAsDevToolsJson(String path) async {
+  /// which would balloon into thousands of extra RPC round-trips.
+  Future<ProfileFile?> saveAsDevToolsJson(String path) async {
     final service = _service;
     final isolateId = _isolateId;
-    if (service == null || isolateId == null) return;
+    if (service == null || isolateId == null) return null;
 
     final cs = _captured ?? await capture();
-    if (cs == null) return;
+    if (cs == null) return null;
     final funcs = cs.functions ?? const <ProfileFunction>[];
     final samples = cs.samples ?? const <CpuSample>[];
 
@@ -213,9 +204,9 @@ class PerfProfiler {
       final name = _functionName(pf);
       final url = pf.resolvedUrl ?? '';
       final frame = <String, Object?>{'name': name, 'resolvedUrl': url};
-      // DevTools uses the resolved URL as packageUri for
-      // package:/dart: URIs; perf.py's attribution rules key on that
-      // field, so mirror the behaviour here.
+      // DevTools uses the resolved URL as packageUri for package:/dart:
+      // URIs; analysis tools group frames by that field, so mirror the
+      // behaviour here.
       if (url.startsWith('package:') || url.startsWith('dart:')) {
         frame['packageUri'] = url;
       }
@@ -257,9 +248,10 @@ class PerfProfiler {
     final file = File(path);
     await file.parent.create(recursive: true);
     await file.writeAsString(jsonEncode(dump));
-    print(
-      '[PerfProfiler] Wrote DevTools profile: $path '
-      '(${stackFrames.length} frames, ${traceEvents.length} samples)',
+    return ProfileFile(
+      path: path,
+      frameCount: stackFrames.length,
+      sampleCount: traceEvents.length,
     );
   }
 

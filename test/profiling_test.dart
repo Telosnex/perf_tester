@@ -76,5 +76,31 @@ void main() {
               as Map<String, Object?>;
       expect(json, contains('cpu-profiler'));
     }
+
+    expect(result.stdout, contains('FIXTURE_STATUS: captured'));
+    expect(
+      LineSplitter.split(
+        result.stdout as String,
+      ).where((line) => line.startsWith('FIXTURE_PROFILE: ')),
+      [
+        'FIXTURE_PROFILE: A B|cpu_profile_Fixture_test__A_B.json'
+            '|samples=true|saved=true|top=3',
+        'FIXTURE_PROFILE: A_B|cpu_profile_Fixture_test__A_B_2.json'
+            '|samples=true|saved=true|top=3',
+      ],
+    );
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('SilentReporter prints nothing while profiling', () async {
+    final result = await runFixture('silent', tempDir.path);
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    // The VM prints its own service banner; everything else must come from
+    // the fixture.
+    final lines = LineSplitter.split(
+      result.stdout as String,
+    ).where((line) => line.isNotEmpty && !line.startsWith('The Dart '));
+    expect(lines, everyElement(startsWith('FIXTURE_')));
+    expect(lines, contains('FIXTURE_STATUS: captured'));
+    expect(lines, contains('FIXTURE_DONE'));
   }, timeout: const Timeout(Duration(seconds: 60)));
 }
