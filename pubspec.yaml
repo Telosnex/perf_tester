@@ -1,10 +1,31 @@
 name: perf_tester
-description: Compare Dart implementations, report timings, and capture CPU profiles.
+description: >-
+  Compare Dart and Flutter implementations: check that outputs match, time
+  them, test whether the difference is significant, run AOT, and capture CPU
+  profiles.
 version: 0.1.0
-publish_to: none
+repository: https://github.com/Telosnex/perf_tester
+issue_tracker: https://github.com/Telosnex/perf_tester/issues
+topics:
+  - benchmark
+  - performance
+  - profiling
+  - testing
+
 environment:
   sdk: ^3.8.0
+
+platforms:
+  linux:
+  macos:
+  windows:
+
+executables:
+  aot:
+
 dependencies:
   vm_service: ^15.0.0
+
 dev_dependencies:
+  lints: ^6.1.0
   test: ^1.25.0
