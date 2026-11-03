@@ -1,3 +1,8 @@
+## 0.1.1
+
+- `perf_tester:aot --dart` now fails, and prints the build error, when the
+  code needs `dart:ui`. Before, it printed nothing and exited with 0.
+
 ## 0.1.0
 
 First release.

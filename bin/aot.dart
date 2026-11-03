@@ -110,13 +110,21 @@ Future<void> main(List<String> arguments) async {
         ? targets.single.file
         : (File('${outDir.path}/${name}_main.dart')
             ..writeAsStringSync(_dartEntry(outDir, targets)));
-    final exe = await _buildDart(root, outDir, entry, name, label, defines);
+    final exe = await _buildDart(
+      root,
+      outDir,
+      entry,
+      name,
+      label,
+      defines,
+      canUseFlutter: options.flutter == null,
+    );
     if (targets.length > 1) _deleteEntry(entry);
     if (exe != null) {
       exitCode = await _runEach(root, targets, exe, options.args);
       return;
     }
-    if (options.flutter != null || exitCode != 0) return;
+    if (exitCode != 0) return;
     _note('The code needs dart:ui. Building it with Flutter.');
     useFlutter = true;
   }
@@ -263,16 +271,19 @@ File? _findTestConfig(Directory root, File file) {
 // ── Dart ────────────────────────────────────────────────────────────────
 
 /// Builds [entry] with `dart compile exe`. Returns the executable, or null
-/// if the build failed. When the build failed only because the code needs
-/// dart:ui, [exitCode] stays 0.
+/// if the build failed. If [canUseFlutter] is true and the build failed only
+/// because the code needs dart:ui, [exitCode] stays 0 so the caller can
+/// build with Flutter. Otherwise a failed build prints its output and sets
+/// [exitCode].
 Future<String?> _buildDart(
   Directory root,
   Directory outDir,
   File entry,
   String name,
   String label,
-  List<String> defines,
-) async {
+  List<String> defines, {
+  required bool canUseFlutter,
+}) async {
   final exe = '${outDir.path}/$name${Platform.isWindows ? '.exe' : ''}';
   _note('Building $label with dart compile exe...');
   final build = await Process.run(Platform.resolvedExecutable, [
@@ -285,10 +296,15 @@ Future<String?> _buildDart(
   ], workingDirectory: root.path);
   if (build.exitCode == 0) return exe;
   final output = '${build.stdout}${build.stderr}';
-  if (!output.contains('dart:ui')) {
-    stderr.write(output);
-    _fail('Build failed.');
-  }
+  final needsFlutter = output.contains('dart:ui');
+  if (needsFlutter && canUseFlutter) return null;
+  stderr.write(output);
+  _fail(
+    needsFlutter
+        ? 'Build failed: the code needs dart:ui. Remove --dart to build it '
+              'with Flutter.'
+        : 'Build failed.',
+  );
   return null;
 }
 

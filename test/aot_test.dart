@@ -113,6 +113,20 @@ void main() {
       expect(result.stderr, contains('Build failed.'));
     });
 
+    test('--dart fails when the code needs dart:ui', () async {
+      File('${dir.path}/ui.dart').writeAsStringSync('''
+import 'dart:ui' as ui;
+void main() => print(ui.lerpDouble(0, 1, 0.5));
+''');
+      final result = await runAot(['--dart', '${dir.path}/ui.dart']);
+      expect(result.exitCode, 1);
+      expect(result.stderr, contains("Dart library 'dart:ui'"));
+      expect(
+        result.stderr,
+        contains('Remove --dart to build it with Flutter.'),
+      );
+    });
+
     test('usage errors exit 64', () async {
       for (final args in [
         <String>[],
