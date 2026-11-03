@@ -117,7 +117,6 @@ void main() {
       for (final args in [
         <String>[],
         ['--bogus', 'x.dart'],
-        ['a.dart', 'b.dart'],
         ['--dart', '--flutter', 'a.dart'],
         ['-D', 'novalue', 'a.dart'],
       ]) {
@@ -125,6 +124,77 @@ void main() {
         expect(result.exitCode, 64, reason: '$args');
         expect(result.stderr, contains('Usage:'), reason: '$args');
       }
+    });
+
+    test('several files share one build, one process each', () async {
+      final sub = Directory('${dir.path}/sub')..createSync();
+      // Each file increments the same global. A count of 1 in both shows
+      // that state from one file does not reach the next.
+      File('${dir.path}/counter.dart').writeAsStringSync('int count = 0;');
+      File('${dir.path}/a_test.dart').writeAsStringSync('''
+import 'package:test/test.dart';
+import 'counter.dart';
+void main() => test('a', () => print(
+    'A count=\${++count} aot=\${const bool.fromEnvironment('dart.vm.product')}'));
+''');
+      File('${sub.path}/b_test.dart').writeAsStringSync('''
+import 'package:test/test.dart';
+import '../counter.dart';
+Future<void> main() async {
+  await Future<void>.delayed(Duration.zero);
+  test('b', () => print('B count=\${++count}'));
+}
+''');
+      File('${sub.path}/helper.dart').writeAsStringSync('void main() {}');
+      final result = await runAot([dir.path]);
+      expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
+      expect(result.stderr, contains('Building 2 files'));
+      expect(result.stderr, contains('Running 1/2 (AOT): build/aot_test/a_'));
+      expect(result.stderr, contains('Running 2/2 (AOT): build/aot_test/sub'));
+      expect(result.stderr, contains('2 of 2 files passed.'));
+      expect(result.stdout, contains('A count=1 aot=true'));
+      expect(result.stdout, contains('B count=1'));
+      expect(
+        Directory('build/perf_tester_aot').listSync().map((e) => e.path),
+        isNot(contains(endsWith('.dart'))),
+      );
+    });
+
+    test('a failure in one of several files fails the run', () async {
+      File('${dir.path}/ok_test.dart').writeAsStringSync('''
+import 'package:test/test.dart';
+void main() => test('ok', () {});
+''');
+      File('${dir.path}/bad_test.dart').writeAsStringSync('''
+import 'package:test/test.dart';
+void main() => test('bad', () => expect(1, 2));
+''');
+      File(
+        '${dir.path}/script.dart',
+      ).writeAsStringSync("void main() => print('SCRIPT ran');");
+      final result = await runAot([
+        '${dir.path}/bad_test.dart',
+        '${dir.path}/ok_test.dart',
+        '${dir.path}/script.dart',
+      ]);
+      expect(result.exitCode, 1);
+      expect(result.stdout, contains('Some tests failed.'));
+      expect(result.stdout, contains('SCRIPT ran'));
+      expect(result.stderr, contains('2 of 3 files passed.'));
+      expect(result.stderr, contains('Failed: build/aot_test/bad_test.dart'));
+    });
+
+    test('arguments need a single file', () async {
+      File('${dir.path}/a.dart').writeAsStringSync('void main() {}');
+      File('${dir.path}/b.dart').writeAsStringSync('void main() {}');
+      final result = await runAot([
+        '${dir.path}/a.dart',
+        '${dir.path}/b.dart',
+        '--',
+        'x',
+      ]);
+      expect(result.exitCode, 1);
+      expect(result.stderr, contains('work only with one file'));
     });
 
     test('a missing file fails', () async {
@@ -137,7 +207,7 @@ void main() {
   // Builds a Flutter desktop app, which takes about a minute. Run with:
   //   PERF_TESTER_FLUTTER=1 dart test test/aot_test.dart
   test(
-    'Flutter test file with testWidgets and profiling runs AOT',
+    'Flutter test files with testWidgets and profiling run AOT',
     () async {
       final project = Directory.systemTemp.createTempSync('perf_tester_aot_');
       addTearDown(() => project.deleteSync(recursive: true));
@@ -155,7 +225,12 @@ void main() {
       expect(create.exitCode, 0, reason: '${create.stderr}');
       final pub = await Process.run(
         'flutter',
-        ['pub', 'add', 'dev:perf_tester:{"path":"${Directory.current.path}"}'],
+        [
+          'pub',
+          'add',
+          'dev:perf_tester:{"path":"${Directory.current.path}"}',
+          'dev:test',
+        ],
         workingDirectory: project.path,
         runInShell: Platform.isWindows,
       );
@@ -201,12 +276,27 @@ void main() {
   });
 }
 ''');
-      final result = await runAot([
-        'test/bench_test.dart',
-      ], workingDirectory: project.path);
-      expect(result.exitCode, 0, reason: '${result.stdout}${result.stderr}');
-      expect(result.stdout, contains('RESULT aot captured'));
-      expect(result.stdout, contains('All tests passed!'));
+      // Both files run inside flutter_test_config.dart, as with flutter test.
+      File('${project.path}/test/plain_test.dart').writeAsStringSync('''
+import 'dart:async';
+import 'package:test/test.dart';
+void main() => test('plain', () => print('PLAIN \${Zone.current[#config]}'));
+''');
+      File('${project.path}/test/flutter_test_config.dart').writeAsStringSync(
+        '''
+import 'dart:async';
+Future<void> testExecutable(FutureOr<void> Function() testMain) =>
+    runZoned(() async => testMain(), zoneValues: {#config: 'configured'});
+''',
+      );
+      File('${project.path}/test/widget_test.dart').deleteSync();
+      final result = await runAot(['test'], workingDirectory: project.path);
+      final out = '${result.stdout}';
+      expect(result.exitCode, 0, reason: '$out${result.stderr}');
+      expect(result.stderr, contains('Building 2 files as a Flutter'));
+      expect(result.stderr, contains('2 of 2 files passed.'));
+      expect(out, contains('RESULT aot captured'));
+      expect(out, contains('PLAIN configured'));
     },
     skip: Platform.environment['PERF_TESTER_FLUTTER'] == '1'
         ? false
