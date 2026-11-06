@@ -1,3 +1,8 @@
+## 0.1.2
+
+- Excludes build and platform folders from analysis, as Flutter 3.47 does.
+  No code changes.
+
 ## 0.1.1
 
 - `perf_tester:aot --dart` now fails, and prints the build error, when the
