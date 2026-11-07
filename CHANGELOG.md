@@ -1,3 +1,7 @@
+## 1.0.0
+
+- First stable release.
+
 ## 0.1.2
 
 - Excludes build and platform folders from analysis, as Flutter 3.47 does.
