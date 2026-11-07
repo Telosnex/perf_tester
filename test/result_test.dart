@@ -323,8 +323,11 @@ void main() {
             reporter: const SilentReporter(),
           );
       final impl = result.baseline;
-      // Calibration aims 10% over the target. Leave room for noise.
-      expect(impl.median * impl.passesPerSample, greaterThan(1.2));
+      // Calibration aims 10% over the target, but a runner can speed up
+      // after calibration (1.07 ms of 2 ms on ubuntu-24.04). One pass takes
+      // microseconds, so a quarter of the target shows the calibration.
+      expect(impl.passesPerSample, greaterThan(1));
+      expect(impl.median * impl.passesPerSample, greaterThan(0.5));
     });
 
     test('minSampleTime zero times one pass per sample', () async {
