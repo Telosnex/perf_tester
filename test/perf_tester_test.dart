@@ -199,16 +199,17 @@ void validationAndStateTests() {
   });
 
   test('implTimes stay in measurement order after stats are printed', () async {
-    // Each call is slower than the last, so run order is ascending order
-    // only by coincidence; make it descending instead.
-    var delayMs = 8;
+    // Each call is faster than the last, so ascending order is not run
+    // order. The steps are large: a CI runner can pause for 60 ms, and a
+    // Windows timer ticks every 15.6 ms.
+    var delayMs = 300;
     final tester = PerfTester<int, int>.multi(
       testName: 'order',
       testCases: [1],
       implementations: [
         PerfImpl('A', (n) async {
           await Future<void>.delayed(Duration(milliseconds: delayMs));
-          delayMs = delayMs > 2 ? delayMs - 3 : delayMs;
+          delayMs = delayMs ~/ 3;
           return n;
         }),
       ],

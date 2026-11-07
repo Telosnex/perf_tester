@@ -639,10 +639,24 @@ String _stem(File file) {
   return name.endsWith('.dart') ? name.substring(0, name.length - 5) : name;
 }
 
-String _relative(Directory root, File file) =>
-    file.path.startsWith('${root.path}/')
-    ? file.path.substring(root.path.length + 1)
-    : file.path;
+/// [file]'s path relative to [root], with forward slashes, or its own path
+/// if it is not in [root]. Compares URI segments: Windows paths can mix
+/// separators (`D:\\pkg\\build/x\\a_test.dart`).
+String _relative(Directory root, File file) {
+  final base = root.absolute.uri.pathSegments
+      .where((s) => s.isNotEmpty)
+      .toList();
+  final segments = file.absolute.uri.pathSegments;
+  if (segments.length <= base.length) return file.path;
+  for (var i = 0; i < base.length; i++) {
+    if (!_sameSegment(base[i], segments[i])) return file.path;
+  }
+  return segments.sublist(base.length).join('/');
+}
+
+/// Windows paths are not case sensitive.
+bool _sameSegment(String a, String b) =>
+    Platform.isWindows ? a.toLowerCase() == b.toLowerCase() : a == b;
 
 /// A relative import from [from] to [to], with forward slashes.
 String _relativeImport(Directory from, File to) {

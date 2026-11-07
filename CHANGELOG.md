@@ -1,3 +1,9 @@
+## 1.0.1
+
+- `perf_tester:aot` on Windows: with several files, it prints each file's
+  path relative to the package, as on macOS and Linux. Before, it printed
+  the absolute path with mixed separators.
+
 ## 1.0.0
 
 - First stable release.

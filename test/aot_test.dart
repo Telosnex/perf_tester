@@ -1,6 +1,7 @@
 @Timeout(Duration(minutes: 5))
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:perf_tester/perf_tester.dart';
@@ -242,7 +243,7 @@ void main() => test('bad', () => expect(1, 2));
         [
           'pub',
           'add',
-          'dev:perf_tester:{"path":"${Directory.current.path}"}',
+          'dev:perf_tester:${jsonEncode({'path': Directory.current.path})}',
           'dev:test',
         ],
         workingDirectory: project.path,

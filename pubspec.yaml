@@ -3,7 +3,7 @@ description: >-
   Compare Dart and Flutter implementations: check that outputs match, time
   them, test whether the difference is significant, run AOT, and capture CPU
   profiles.
-version: 1.0.0
+version: 1.0.1
 repository: https://github.com/Telosnex/perf_tester
 issue_tracker: https://github.com/Telosnex/perf_tester/issues
 topics:
