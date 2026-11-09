@@ -47,15 +47,6 @@ jobs:
       # The Flutter app opens a window: Linux runs it on a virtual display.
       - run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}dart test -r expanded
 
-  # The app ships a universal macOS build.
-  desktop-macos-x64:
-    name: macOS x64
-    runs-on: macos-15-intel
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-    steps: *desktop_steps
-
   desktop-linux-x64:
     name: Linux x64
     runs-on: ubuntu-24.04
