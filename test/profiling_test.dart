@@ -7,7 +7,20 @@ import 'package:test/test.dart';
 /// A leaked VM service connection keeps the child alive, so a timeout here
 /// means cleanup failed.
 Future<ProcessResult> runFixture(String mode, String outputDir) async {
+  final sdkBin = File(Platform.resolvedExecutable).parent.uri;
+  final jitService = File.fromUri(
+    sdkBin.resolve('snapshots/dart_runtime_service_vm.dart.snapshot'),
+  );
+  final aotService = File.fromUri(
+    sdkBin.resolve('snapshots/dart_runtime_service_vm_aot.dart.snapshot'),
+  );
+  // Dart 3.14's Windows ARM64 SDK ships the experimental AOT service but
+  // omits its JIT counterpart. Use the VM's built-in service in that case,
+  // so the end-to-end profiling tests still run on the native JIT runtime.
+  final useBuiltInService =
+      Platform.isWindows && !jitService.existsSync() && aotService.existsSync();
   final process = await Process.start(Platform.resolvedExecutable, [
+    if (useBuiltInService) '--disable-experimental-vm-service',
     'run',
     '--enable-vm-service=0',
     '--disable-service-auth-codes',
