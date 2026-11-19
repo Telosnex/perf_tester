@@ -1,3 +1,7 @@
+## 1.0.2
+
+- Flutter 3.50 compatability
+
 ## 1.0.1
 
 - `perf_tester:aot` on Windows: with several files, it prints each file's
