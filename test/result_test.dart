@@ -419,8 +419,18 @@ void main() {
       expect(c.isSignificant, isTrue);
       expect(c.speedup, lessThan(1));
       expect(c.probabilityFaster, 0);
-      // All 6 baseline samples below all 6: the smallest possible p.
-      expect(c.pValue, closeTo(minimumPValue(6, 6), 1e-12));
+      // All 6 baseline samples are below all 6 of the slower samples. With
+      // no tied samples, this gives the smallest possible p. A coarse clock
+      // (Windows) can tie samples in one implementation, and then p comes
+      // from the normal approximation.
+      final base = result.implementations[0].samples;
+      final slow = result.implementations[1].samples;
+      expect(base.reduce(math.max), lessThan(slow.reduce(math.min)));
+      expect(c.pValue, mannWhitneyU(base, slow).pValue);
+      if ({...base, ...slow}.length == 12) {
+        expect(c.pValue, closeTo(minimumPValue(6, 6), 1e-12));
+      }
+      expect(c.pValue, lessThan(0.01));
     });
 
     test('three runs are too few to compare', () async {
